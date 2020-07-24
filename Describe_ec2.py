@@ -1,7 +1,7 @@
 import boto3
 from collections import defaultdict
-#key = 'AKIAJ4NOSZX7SWL7IFGQ'
-#secret = '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'
+#key = ''
+#secret = ''
 
 ec2 = boto3.resource('ec2')
 
