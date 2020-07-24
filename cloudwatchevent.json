@@ -1,0 +1,16 @@
+{
+    "version": "0",
+    "id": "9c595e18-ee46-72bf-d6ec-98801c66d384",
+    "detail-type": "EC2 Instance State-change Notification",
+    "source": "aws.ec2",
+    "account": "805746249177",
+    "time": "2020-07-24T14: 16: 00Z",
+    "region": "ap-south-1",
+    "resources": [
+        "arn:aws:ec2:ap-south-1: 805746249177:instance/i-0ed156af7d3b33dc6"
+    ],
+    "detail": {
+        "instance-id": "i-0ed156af7d3b33dc6",
+        "state": "stopped"
+    }
+}
