@@ -10,7 +10,7 @@
         "arn:aws:ec2:ap-south-1: 805746249177:instance/i-0ed156af7d3b33dc6"
     ],
     "detail": {
-        "instance-id": "i-0ed156af7d3b33dc6",
-        "state": "stopped"
+        "instance-id": "i-031bc1e674943a27d",
+        "state": "running"
     }
 }
