@@ -1,8 +1,9 @@
 import boto3
 import json
 
+
 config = json.loads(open("config.json", 'r').read())
-event_json = json.loads(open("cloudwatchevent.json", 'r').read())
+
 
 # Global Variables
 DOMAIN_NAME = config['DOMAIN_NAME']
@@ -15,20 +16,21 @@ aws_session = boto3.Session(
 )
 
 
-# def lambda_handler(event, context):
-#     # TODO implement
-#     print(event)
-#     return {
-#         'statusCode': 200,
-#         'body': json.dumps('Hello from Lambda!')
-#     }
+def lambda_handler(event, context):
+    print(event)
+    main(event)
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f'Function executed')
+    }
+
 
 
 def desc_instance(instance_id):
     ec2_client = aws_session.client('ec2')
     ec2_described = ec2_client.describe_instances(
         InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
-    print(ec2_described)
+    # print(ec2_described)
 
     return_info = {}
 
@@ -53,24 +55,41 @@ def desc_instance(instance_id):
 def delete_route53_record_set(dns):
     route53_client = aws_session.client('route53')
 
-    response = route53_client.change_resource_record_sets(
+    record_desc = route53_client.list_resource_record_sets(
+        HostedZoneId=ROUTE53_ZONE_ID,
+        StartRecordName=f'{dns}.{DOMAIN_NAME}',
+        StartRecordType='A',
+        MaxItems='1'
+    )
+
+    record_desc = record_desc['ResourceRecordSets'][0]
+    if record_desc['Name'] != f'{dns}.{DOMAIN_NAME}.':
+        print(f'records from list {record_desc["Name"]} !=  passed dns: {dns}.{DOMAIN_NAME}.')
+        return False
+
+    delete_res = route53_client.change_resource_record_sets(
         HostedZoneId=ROUTE53_ZONE_ID,
         ChangeBatch={
             'Changes': [
                 {
                     'Action': 'DELETE',
                     'ResourceRecordSet': {
-                        'Name': f'{dns}.{DOMAIN_NAME}',
-                        'TTL': 300,
-                        'Type': 'A',
+                        'Name': record_desc['Name'],
+                        'ResourceRecords': [
+                            {
+                                'Value': record_desc['ResourceRecords'][0]['Value'],
+                            }
+                        ],
+                        'TTL': record_desc['TTL'],
+                        'Type': record_desc['Type'],
                     },
                 },
             ],
         },
     )
 
-    print("Deleted record Set", response)
-    return
+    print("Deleted record Set", delete_res)
+    return True
 
 
 def create_route53_record_set(ipv4, dns, instance_id):
@@ -94,7 +113,7 @@ def create_route53_record_set(ipv4, dns, instance_id):
                                 'Value': ipv4,
                             },
                         ],
-                        'TTL': 60,
+                        'TTL': 300,
                         'Type': 'A',
                     },
                 },
@@ -105,13 +124,9 @@ def create_route53_record_set(ipv4, dns, instance_id):
     return True
 
 
-def main():
+def main(event_json):
     print("Function START")
     instance_id = event_json['detail']['instance-id']
     instance_meta = desc_instance(instance_id)
     create_route53_record_set(instance_meta['ipv4'], instance_meta['dns'], instance_id)
     print("Function END")
-
-
-if __name__ == '__main__':
-    main()
