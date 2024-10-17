@@ -1,132 +1,173 @@
-import boto3
 import json
+import os
 
-
-config = json.loads(open("config.json", 'r').read())
-
+import boto3
 
 # Global Variables
-DOMAIN_NAME = config['DOMAIN_NAME']
-ROUTE53_ZONE_ID = config['ROUTE53_ZONE_ID']
+DOMAIN_NAME = os.environ['DOMAIN_NAME']
+ROUTE53_ZONE_ID = os.environ['ROUTE53_ZONE_ID']
+AWS_PRIMARY_REGION = os.environ['AWS_PRIMARY_REGION']
+AWS_ACCESS_KEY_ID = os.environ['AWS_ACCESS_KEY_ID']
+AWS_SECRET_ACCESS_KEY = os.environ['AWS_SECRET_ACCESS_KEY']
 
-aws_session = boto3.Session(
-    region_name=config['AWS_REGION']
-    # aws_access_key_id=config_json["AWS_ACCESS_KEY"],
-    # aws_secret_access_key=config_json["AWS_SECRET_KEY"],
-)
+
+class IpToDNSMapper:
+    """
+    Class to map an EC2 instance's public IP to a Route 53 DNS record.
+
+    Attributes:
+        instance_id (str): The ID of the EC2 instance.
+        _ipv4 (str): The public IPv4 address of the EC2 instance.
+        _dns_str (str): The DNS name to be associated with the instance.
+        _ec2_client (boto3.client): Client to interact with EC2.
+        _route53_client (boto3.client): Client to interact with Route 53.
+    """
+
+    def __init__(self, instance_id) -> None:
+        """
+        Initializes the IpToDNSMapper object with the instance ID and AWS clients.
+
+        Args:
+            instance_id (str): The ID of the EC2 instance.
+        """
+        self._instance_id = instance_id
+        self._ipv4 = ""
+        self._dns_str = ""
+
+        # Initialize EC2 and Route 53 clients
+        aws_session = boto3.Session(
+            region_name=AWS_PRIMARY_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        )
+        self._ec2_client = aws_session.client('ec2')
+        self._route53_client = aws_session.client('route53')
+
+    def _delete_route53_record_set(self) -> bool:
+        """
+        Deletes a Route 53 DNS record if it exists.
+
+        Returns:
+            bool: True if the DNS record was successfully deleted.
+        """
+        try:
+            # Get existing Route 53 record set details
+            record_desc = self._route53_client.list_resource_record_sets(
+                HostedZoneId=ROUTE53_ZONE_ID,
+                StartRecordName=f'{self._dns_str}.{DOMAIN_NAME}',
+                StartRecordType='A',
+                MaxItems='1'
+            )['ResourceRecordSets'][0]
+
+            # Verify if the record matches the instance DNS
+            if record_desc['Name'] != f'{self._dns_str}.{DOMAIN_NAME}.':
+                print(f"Record mismatch: {record_desc['Name']} != {self._dns_str}.{DOMAIN_NAME}.")
+                return False
+
+            # Delete the Route 53 record
+            delete_res = self._route53_client.change_resource_record_sets(
+                HostedZoneId=ROUTE53_ZONE_ID,
+                ChangeBatch={
+                    'Changes': [
+                        {
+                            'Action': 'DELETE',
+                            'ResourceRecordSet': {
+                                'Name': record_desc['Name'],
+                                'ResourceRecords': [{'Value': record_desc['ResourceRecords'][0]['Value']}],
+                                'TTL': record_desc['TTL'],
+                                'Type': record_desc['Type'],
+                            },
+                        },
+                    ],
+                },
+            )
+            print("Deleted record set", delete_res)
+            return True
+        except Exception as e:
+            print(f"Error deleting record: {e}")
+            return False
+
+    def _create_route53_record_set(self) -> bool:
+        """
+        Creates or updates a Route 53 DNS record to map the instance's IP.
+
+        Returns:
+            bool: True if DNS record creation was successful.
+        """
+        try:
+            response = self._route53_client.change_resource_record_sets(
+                HostedZoneId=ROUTE53_ZONE_ID,
+                ChangeBatch={
+                    'Comment': f'DNS attached to instance {self._instance_id}',
+                    'Changes': [
+                        {
+                            'Action': 'UPSERT',
+                            'ResourceRecordSet': {
+                                'Name': f'{self._dns_str}.{DOMAIN_NAME}',
+                                'ResourceRecords': [{'Value': self._ipv4}],
+                                'TTL': 300,
+                                'Type': 'A',
+                            },
+                        },
+                    ],
+                },
+            )
+            print("Created/Updated record set", response)
+            return True
+        except Exception as e:
+            print(f"Error creating/updating record: {e}")
+            return False
+
+    def set_dns(self) -> bool:
+        """
+        Maps the EC2 instance's public IP to a Route 53 DNS record.
+        Deletes the DNS record if the instance is terminated.
+        If the instance is stopped, it sets the IP to 127.0.0.1.
+
+        Returns:
+            bool: True if DNS record creation/deletion was successful.
+        """
+        try:
+            # Describe the EC2 instance
+            ec2_described = self._ec2_client.describe_instances(InstanceIds=[self._instance_id])['Reservations'][0]['Instances'][0]
+            instance_state = ec2_described['State']['Name']
+
+            # Get DNS name from instance tags
+            self._dns_str = next(
+                (tag['Value'].strip().lower() for tag in ec2_described['Tags'] if tag['Key'].strip().lower() == 'dns'),
+                ""
+            )
+
+            # Handle instance state
+            if instance_state == 'terminated':
+                return self._delete_route53_record_set()
+            elif instance_state == 'running':
+                self._ipv4 = ec2_described.get('PublicIpAddress', "")
+            elif instance_state == 'stopped':
+                self._ipv4 = '127.0.0.1'
+
+            return self._create_route53_record_set()
+        except Exception as e:
+            print(f"Error in set_dns: {e}")
+            return False
 
 
 def lambda_handler(event, context):
+    """
+    AWS Lambda handler function that sets the DNS for an EC2 instance.
+
+    Args:
+        event (dict): The event data from AWS Lambda, containing instance details.
+        context (dict): The runtime information from AWS Lambda.
+
+    Returns:
+        dict: Status code and message indicating function execution.
+    """
     print(event)
-    main(event)
+    obj = IpToDNSMapper(event['detail']['instance-id'])
+    success = obj.set_dns()
+
     return {
-        'statusCode': 200,
-        'body': json.dumps(f'Function executed')
+        'statusCode': 200 if success else 500,
+        'body': json.dumps('Function executed' if success else 'Function failed')
     }
-
-
-
-def desc_instance(instance_id):
-    ec2_client = aws_session.client('ec2')
-    ec2_described = ec2_client.describe_instances(
-        InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
-    # print(ec2_described)
-
-    return_info = {}
-
-    instance_state = ec2_described['State']['Name']
-    instance_tags = ec2_described['Tags'] or None
-
-    if instance_state == 'running':
-        return_info['ipv4'] = ec2_described['PublicIpAddress']
-    elif instance_state == 'stopped':
-        return_info['ipv4'] = '127.0.0.1'
-    elif instance_state == 'terminated':
-        return_info['ipv4'] = None
-
-    if instance_tags is not None:
-        for tag_elem in instance_tags:
-            if (tag_elem['Key']).lower() == 'dns':
-                return_info['dns'] = ((tag_elem['Value']).lower()).strip()
-
-    return return_info
-
-
-def delete_route53_record_set(dns):
-    route53_client = aws_session.client('route53')
-
-    record_desc = route53_client.list_resource_record_sets(
-        HostedZoneId=ROUTE53_ZONE_ID,
-        StartRecordName=f'{dns}.{DOMAIN_NAME}',
-        StartRecordType='A',
-        MaxItems='1'
-    )
-
-    record_desc = record_desc['ResourceRecordSets'][0]
-    if record_desc['Name'] != f'{dns}.{DOMAIN_NAME}.':
-        print(f'records from list {record_desc["Name"]} !=  passed dns: {dns}.{DOMAIN_NAME}.')
-        return False
-
-    delete_res = route53_client.change_resource_record_sets(
-        HostedZoneId=ROUTE53_ZONE_ID,
-        ChangeBatch={
-            'Changes': [
-                {
-                    'Action': 'DELETE',
-                    'ResourceRecordSet': {
-                        'Name': record_desc['Name'],
-                        'ResourceRecords': [
-                            {
-                                'Value': record_desc['ResourceRecords'][0]['Value'],
-                            }
-                        ],
-                        'TTL': record_desc['TTL'],
-                        'Type': record_desc['Type'],
-                    },
-                },
-            ],
-        },
-    )
-
-    print("Deleted record Set", delete_res)
-    return True
-
-
-def create_route53_record_set(ipv4, dns, instance_id):
-    if ipv4 is None:
-        delete_route53_record_set(dns)
-        return False
-
-    route53_client = aws_session.client('route53')
-
-    response = route53_client.change_resource_record_sets(
-        HostedZoneId=ROUTE53_ZONE_ID,
-        ChangeBatch={
-            'Comment': f'DNS attached to instance {instance_id}',
-            'Changes': [
-                {
-                    'Action': 'UPSERT',
-                    'ResourceRecordSet': {
-                        'Name': f'{dns}.{DOMAIN_NAME}',
-                        'ResourceRecords': [
-                            {
-                                'Value': ipv4,
-                            },
-                        ],
-                        'TTL': 300,
-                        'Type': 'A',
-                    },
-                },
-            ],
-        },
-    )
-    print("Created record Set", response)
-    return True
-
-
-def main(event_json):
-    print("Function START")
-    instance_id = event_json['detail']['instance-id']
-    instance_meta = desc_instance(instance_id)
-    create_route53_record_set(instance_meta['ipv4'], instance_meta['dns'], instance_id)
-    print("Function END")
