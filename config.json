@@ -1,8 +1,0 @@
-{
-  "AWS_ACCESS_KEY":"" ,
-  "AWS_SECRET_KEY":"",
-  "AWS_REGION": "ap-south-1",
-  "ROUTE53_ZONE_ID": "",
-  "DOMAIN_NAME": ""
-
-}
